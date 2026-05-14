@@ -99,7 +99,7 @@ It’s designed for **small to medium websites, edge nodes, and private deployme
 ## ✨ Core Features
 
 - **Ready-to-Use Web Runtime**  
-  Compiles latest Nginx (1.30.x) with `dav-ext`, `http2`, and `stream` modules.  
+  Compiles latest Nginx (1.31.x) with `dav-ext`, `http2`, and `stream` modules.  
   Supports PHP 8.2–8.5 and MariaDB 10.6 / 10.11 / 11.8.
 
 - **Kernel & Network Optimization**  
