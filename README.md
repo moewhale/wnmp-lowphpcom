@@ -38,6 +38,8 @@ Therefore, WNMP is recommended for use on KVM virtual machines, cloud servers, o
 
 ## Update Log
 
+v1.43 2026-05-16 Added `wnmp update nginx` and `wnmp update php` for standalone Nginx and PHP upgrades. The update command backs up existing configuration, installs required build dependencies, lets you enter the target version, recompiles the selected component, restarts the related service, and cleans up temporary proxy tunnel settings after completion.
+
 v1.42 2026-05-13 nginx-1.30.1 stable and nginx-1.31.0 mainline versions have been released, with fixes for HTTP/2 request injection vulnerability in the ngx_http_proxy_module (CVE-2026-42926), buffer overflow vulnerability in the ngx_http_rewrite_module (CVE-2026-42945), buffer overread vulnerabilities in the ngx_http_scgi_module and ngx_http_uwsgi_module (CVE-2026-42946), buffer overread vulnerability in the ngx_http_charset_module (CVE-2026-42934), address spoofing vulnerability in HTTP/3 (CVE-2026-40460), and use-after-free vulnerability in OCSP requests to resolver (CVE-2026-40701). Additionally, nginx-1.31.0 mainline version features support for HTTP forward proxy. At the same time, update PHP to the latest versions: 8.5.6, 8.4.21, 8.3.21, and 8.2.21
 
 v1.41 Fixed the issue with the WebDAV standalone launch feature
@@ -160,6 +162,8 @@ Please execute commands using the root account on a completely clean system.
 | Create New Virtual Host (with SSL) | `wnmp vhost` |
 | Kernel/Network Optimization Only | `wnmp tool` #Verification command: ulimit -n && ulimit -u && sysctl --system | 
 | Restart All Services | `wnmp restart` |
+| Update Nginx | `wnmp update nginx` # Then enter the target Nginx version |
+| Update PHP | `wnmp update php` # Then enter the target PHP version |
 | Cleanup | `wnmp remove` / `wnmp renginx` / `wnmp rephp` / `wnmp remariadb` |
 | SSL Renewal | `wnmp sshcheck` / `wnmp sshtest`  |
 ---

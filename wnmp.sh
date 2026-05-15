@@ -3,7 +3,7 @@
 # Copyright (C) 2026 wnmp.org
 # Website: https://wnmp.org
 # License: GNU General Public License v3.0 (GPLv3)
-# Version: 1.42
+# Version: 1.43
 
 set -euo pipefail
 
@@ -64,7 +64,7 @@ green  " [init] WNMP one-click installer started"
 green  " [init] https://wnmp.org"
 green  " [init] Logs saved to: ${LOGFILE}"
 green  " [init] Start time: $(date '+%F %T')"
-green  " [init] Version: 1.42"
+green  " [init] Version: 1.43"
 green  "============================================================"
 echo
 sleep 1
@@ -79,6 +79,8 @@ Usage:
   wnmp vhost         # Create a virtual host (with SSL certificate)
   wnmp tool          # Kernel / network tuning only
   wnmp restart       # Restart services
+  wnmp update nginx  # Update Nginx, then enter the target version
+  wnmp update php    # Update PHP, then enter the target version
   wnmp remove        # Uninstall everything
   wnmp renginx       # Uninstall Nginx
   wnmp rephp         # Uninstall PHP
@@ -2344,6 +2346,106 @@ EOF
 
 
 
+backup_nginx_config() {
+  local nginx_dir="/usr/local/nginx"
+  local conf="${nginx_dir}/nginx.conf"
+  local vhost="${nginx_dir}/vhost"
+  local rewrite="${nginx_dir}/rewrite"
+  local ssl="${nginx_dir}/ssl"
+
+  if [ ! -d "$nginx_dir" ] && [ ! -f "$conf" ] && [ ! -d "$vhost" ] && [ ! -d "$rewrite" ] && [ ! -d "$ssl" ]; then
+    echo "[backup] No Nginx config found; skipped."
+    return 0
+  fi
+
+  local ts backup_dir
+  ts="$(date +%Y%m%d_%H%M%S)"
+  backup_dir="/home/wnmp-backup/nginx-${ts}"
+  mkdir -p "$backup_dir"
+
+  [ -f "$conf" ] && cp -a "$conf" "$backup_dir/nginx.conf"
+  [ -d "$vhost" ] && cp -a "$vhost" "$backup_dir/vhost"
+  [ -d "$rewrite" ] && cp -a "$rewrite" "$backup_dir/rewrite"
+  [ -d "$ssl" ] && cp -a "$ssl" "$backup_dir/ssl"
+
+  echo "[backup] Nginx config backup saved: ${backup_dir}"
+  WNMP_LAST_NGINX_BACKUP="${backup_dir}"
+}
+
+backup_php_config() {
+  local php_ini="/usr/local/php/etc/php.ini"
+
+  if [ ! -f "$php_ini" ]; then
+    echo "[backup] No php.ini found; skipped."
+    return 0
+  fi
+
+  local ts backup_dir
+  ts="$(date +%Y%m%d_%H%M%S)"
+  backup_dir="/home/wnmp-backup/php-${ts}"
+  mkdir -p "$backup_dir"
+  cp -a "$php_ini" "$backup_dir/php.ini"
+
+  echo "[backup] PHP config backup saved: ${backup_dir}/php.ini"
+  WNMP_LAST_PHP_INI_BACKUP="${backup_dir}/php.ini"
+}
+
+wnmp_latest_nginx_backup() {
+  [ -d /home/wnmp-backup ] || return 0
+  find /home/wnmp-backup -maxdepth 1 -type d -name 'nginx-*' 2>/dev/null | sort | tail -n1
+}
+
+wnmp_latest_php_ini_backup() {
+  [ -d /home/wnmp-backup ] || return 0
+  find /home/wnmp-backup -maxdepth 2 -type f -path '/home/wnmp-backup/php-*/php.ini' 2>/dev/null | sort | tail -n1
+}
+
+wnmp_resolve_nginx_backup() {
+  if [ -n "${WNMP_LAST_NGINX_BACKUP:-}" ] && [ -d "${WNMP_LAST_NGINX_BACKUP}" ]; then
+    printf '%s\n' "${WNMP_LAST_NGINX_BACKUP}"
+    return 0
+  fi
+
+  wnmp_latest_nginx_backup
+}
+
+wnmp_resolve_php_ini_backup() {
+  if [ -n "${WNMP_LAST_PHP_INI_BACKUP:-}" ] && [ -f "${WNMP_LAST_PHP_INI_BACKUP}" ]; then
+    printf '%s\n' "${WNMP_LAST_PHP_INI_BACKUP}"
+    return 0
+  fi
+
+  wnmp_latest_php_ini_backup
+}
+
+wnmp_restore_nginx_backup() {
+  local backup_dir="$1"
+  local label="${2:-[restore]}"
+  local backup_item
+
+  [ -n "$backup_dir" ] && [ -d "$backup_dir" ] || return 0
+
+  [ -f "${backup_dir}/nginx.conf" ] && cp -a "${backup_dir}/nginx.conf" /usr/local/nginx/nginx.conf
+  for backup_item in vhost rewrite ssl; do
+    if [ -d "${backup_dir}/${backup_item}" ]; then
+      rm -rf "/usr/local/nginx/${backup_item}"
+      cp -a "${backup_dir}/${backup_item}" "/usr/local/nginx/${backup_item}"
+    fi
+  done
+
+  echo "${label} Restored previous Nginx config: ${backup_dir}"
+}
+
+wnmp_restore_php_ini_backup() {
+  local php_ini_backup="$1"
+  local label="${2:-[restore]}"
+
+  [ -n "$php_ini_backup" ] && [ -f "$php_ini_backup" ] || return 0
+
+  cp -a "$php_ini_backup" /usr/local/php/etc/php.ini
+  echo "${label} Restored previous php.ini: ${php_ini_backup}"
+}
+
 purge_nginx() {
 
   local _errexit_was_on=0
@@ -2353,6 +2455,7 @@ purge_nginx() {
   fi
 
   echo "Purging NGINX (continue no matter what)..."
+  backup_nginx_config || true
 
   systemctl stop nginx 2>/dev/null
   systemctl disable nginx 2>/dev/null
@@ -2395,6 +2498,9 @@ purge_nginx() {
 
 purge_php() {
   echo "Purging PHP (if any)..."
+  if [ "${WNMP_SKIP_PHP_BACKUP:-0}" != "1" ]; then
+    backup_php_config || true
+  fi
   systemctl stop php-fpm 2>/dev/null || true
   systemctl disable php-fpm 2>/dev/null || true
   rm -f /etc/systemd/system/php-fpm.service
@@ -3215,6 +3321,402 @@ ensure_user() {
   fi
 }
 
+wnmp_validate_version() {
+  local version="$1"
+  [[ "$version" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]
+}
+
+wnmp_read_update_version() {
+  local name="$1"
+  local example="$2"
+  local version=""
+
+  read -rp "Please enter ${name} version [example: ${example}]: " version
+  version="${version//[[:space:]]/}"
+  if ! wnmp_validate_version "$version"; then
+    echo "[update][ERROR] Invalid ${name} version: ${version}"
+    return 1
+  fi
+
+  printf '%s\n' "$version"
+}
+
+wnmp_current_nginx_version() {
+  local out version
+
+  if [ -x /usr/local/nginx/sbin/nginx ]; then
+    out="$(/usr/local/nginx/sbin/nginx -v 2>&1 || true)"
+  elif command -v nginx >/dev/null 2>&1; then
+    out="$(nginx -v 2>&1 || true)"
+  else
+    out=""
+  fi
+
+  version="$(printf '%s\n' "$out" | sed -n 's/.*nginx\/\([0-9][0-9.]*\).*/\1/p' | head -n1)"
+  printf '%s\n' "${version:-unknown}"
+}
+
+wnmp_current_php_version() {
+  local php_bin version
+
+  if [ -x /usr/local/php/bin/php ]; then
+    php_bin="/usr/local/php/bin/php"
+  elif command -v php >/dev/null 2>&1; then
+    php_bin="$(command -v php)"
+  else
+    php_bin=""
+  fi
+
+  if [ -n "$php_bin" ]; then
+    version="$("$php_bin" -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+    if [ -z "$version" ]; then
+      version="$("$php_bin" -v 2>/dev/null | sed -n '1s/^PHP \([0-9][^ ]*\).*/\1/p')"
+    fi
+  fi
+
+  printf '%s\n' "${version:-unknown}"
+}
+
+wnmp_install_build_deps() {
+  apt update
+  apt install -y libtool automake make gcc net-tools libc-ares-dev apache2-utils git liblzma-dev libedit-dev libncurses5-dev libnuma-dev libaio-dev libsnappy-dev libicu-dev liblz4-dev screen build-essential liburing-dev liburing2 \
+    libzstd-dev wget curl m4 autoconf re2c pkg-config libxml2-dev libsodium-dev libcurl4-openssl-dev \
+    libbz2-dev openssl libssl-dev libtidy-dev libxslt1-dev libsqlite3-dev zlib1g-dev \
+    libpng-dev libjpeg-dev libwebp-dev libonig-dev libzip-dev libpcre2-8-0 libpcre2-dev \
+    cmake bison libncurses-dev libfreetype-dev unzip
+}
+
+wnmp_update_nginx() {
+  local nginx_version old_nginx_version
+  old_nginx_version="$(wnmp_current_nginx_version)"
+  echo "[update] Current Nginx version: ${old_nginx_version}"
+
+  nginx_version="$(wnmp_read_update_version "Nginx" "1.31.0")" || return 1
+  echo "[update] Start updating Nginx to ${nginx_version}"
+  backup_nginx_config || true
+  wnmp_install_build_deps
+  ensure_group www
+  ensure_user www www
+
+  cd "$WNMPDIR"
+  local nginx_tar="nginx-${nginx_version}.tar.gz"
+  local nginx_dir="nginx-${nginx_version}"
+  rm -rf "$nginx_dir" nginx nginx-dav-ext-module tmp
+
+  if [ ! -f "$nginx_tar" ]; then
+    download_with_mirrors "https://nginx.org/download/${nginx_tar}" "$WNMPDIR/$nginx_tar"
+  fi
+
+  mkdir -p tmp
+  tar zxf "$nginx_tar" -C tmp
+  mv tmp/* "$nginx_dir"
+  rm -rf tmp
+  cd "$nginx_dir"
+
+  git --version >/dev/null || { log "git missing"; exit 1; }
+  git_clone_wnmp https://github.com/arut/nginx-dav-ext-module.git
+  make clean || true
+
+  ./configure \
+    --prefix=/usr/local/nginx \
+    --user=www \
+    --group=www \
+    --sbin-path=/usr/local/nginx/sbin/nginx \
+    --conf-path=/usr/local/nginx/nginx.conf \
+    --error-log-path=/usr/local/nginx/error.log \
+    --http-log-path=/usr/local/nginx/access.log \
+    --pid-path=/usr/local/nginx/nginx.pid \
+    --lock-path=/usr/local/nginx/nginx.lock \
+    --http-client-body-temp-path=/usr/local/nginx/client_temp \
+    --http-proxy-temp-path=/usr/local/nginx/proxy_temp \
+    --http-fastcgi-temp-path=/usr/local/nginx/fastcgi_temp \
+    --http-uwsgi-temp-path=/usr/local/nginx/uwsgi_temp \
+    --http-scgi-temp-path=/usr/local/nginx/scgi_temp \
+    --with-file-aio \
+    --with-threads \
+    --with-http_addition_module \
+    --with-http_auth_request_module \
+    --with-http_dav_module \
+    --with-http_gunzip_module \
+    --with-http_gzip_static_module \
+    --with-http_realip_module \
+    --with-http_secure_link_module \
+    --with-http_slice_module \
+    --with-http_ssl_module \
+    --with-http_stub_status_module \
+    --with-http_sub_module \
+    --with-http_v2_module \
+    --with-http_v3_module \
+    --with-stream \
+    --with-stream_realip_module \
+    --with-stream_ssl_module \
+    --with-stream_ssl_preread_module \
+    --with-pcre-jit \
+    --with-http_mp4_module \
+    --with-cc-opt="-O2 -pipe -fstack-protector-strong -fPIC -Wformat -Werror=format-security" \
+    --with-ld-opt="-Wl,-z,relro -Wl,-z,now -Wl,--as-needed" \
+    --add-module=./nginx-dav-ext-module
+
+  make -j${JOBS}
+  systemctl stop nginx 2>/dev/null || true
+  make install
+  wnmp_restore_nginx_backup "$(wnmp_resolve_nginx_backup)" "[update]"
+  strip /usr/local/nginx/sbin/nginx || true
+  systemctl daemon-reload || true
+  systemctl restart nginx 2>/dev/null || /usr/local/nginx/sbin/nginx
+  nginx -v
+  echo "[update] Nginx update completed."
+}
+
+wnmp_update_php() {
+  local php_version old_php_version
+  old_php_version="$(wnmp_current_php_version)"
+  echo "[update] Current PHP version: ${old_php_version}"
+
+  php_version="$(wnmp_read_update_version "PHP" "8.4.21")" || return 1
+  echo "[update] Start updating PHP to ${php_version}"
+  backup_php_config || true
+  wnmp_install_build_deps
+  ensure_group www
+  ensure_user www www
+
+  WNMP_SKIP_PHP_BACKUP=1 purge_php || true
+
+  cd "$WNMPDIR"
+  local php_tar="php-${php_version}.tar.gz"
+  local php_dir="php-${php_version}"
+  rm -rf "$php_dir"
+
+  if [ ! -f "$php_tar" ]; then
+    download_with_mirrors "https://www.php.net/distributions/${php_tar}" "$WNMPDIR/$php_tar"
+  fi
+
+  tar zxvf "$php_tar"
+  cd "$php_dir"
+  make distclean || true
+
+  local PREFIX="/usr/local/php"
+  local PHP_ETC="${PREFIX}/etc"
+  local PHP_CONF_D="${PREFIX}/conf.d"
+  local FPM_USER="www"
+  local FPM_GROUP="www"
+  local CONFIGURE_OPTS=(
+    "--prefix=${PREFIX}"
+    "--with-config-file-path=${PHP_ETC}"
+    "--with-config-file-scan-dir=${PHP_CONF_D}"
+    "--with-pear"
+    "--enable-fileinfo"
+    "--with-sodium"
+    "--enable-soap"
+    "--enable-phar"
+    "--disable-zts"
+    "--disable-rpath"
+    "--enable-exif"
+    "--enable-intl"
+    "--enable-fpm"
+    "--with-fpm-user=${FPM_USER}"
+    "--with-fpm-group=${FPM_GROUP}"
+    "--enable-mysqlnd"
+    "--with-mysqli=mysqlnd"
+    "--with-pdo-mysql=mysqlnd"
+    "--with-jpeg"
+    "--with-freetype"
+    "--with-webp"
+    "--enable-gd"
+    "--with-zlib"
+    "--enable-xml"
+    "--enable-pcntl"
+    "--enable-posix"
+    "--enable-bcmath"
+    "--with-curl"
+    "--enable-mbregex"
+    "--enable-mbstring"
+    "--with-openssl"
+    "--with-mhash"
+    "--enable-sockets"
+    "--with-zip"
+  )
+
+  if [[ "$php_version" =~ ^8\.2\. ]]; then
+    CONFIGURE_OPTS+=("--enable-opcache")
+  fi
+
+  ./configure "${CONFIGURE_OPTS[@]}"
+  make -j${JOBS}
+  make install
+
+  find /usr/local/php -type f -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true
+  strip /usr/local/php/bin/php 2>/dev/null || true
+  strip /usr/local/php/sbin/php-fpm 2>/dev/null || true
+
+  cat <<'EOF' > /etc/systemd/system/php-fpm.service
+[Unit]
+Description=The PHP FastCGI Process Manager
+After=network.target
+
+[Service]
+Type=simple
+PIDFile=/usr/local/php/var/run/php-fpm.pid
+ExecStart=/usr/local/php/sbin/php-fpm --nodaemonize --fpm-config /usr/local/php/etc/php-fpm.conf
+ExecReload=/bin/kill -USR2 $MAINPID
+ExecStop=/bin/kill -s QUIT $MAINPID
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+
+  cat <<'EOF' > /usr/local/php/etc/php-fpm.conf
+[global]
+pid = /usr/local/php/var/run/php-fpm.pid
+error_log = /usr/local/php/var/log/php-fpm.log
+log_level = notice
+
+[www]
+listen = /tmp/php-cgi.sock
+listen.backlog = -1
+listen.allowed_clients = 127.0.0.1
+listen.owner = www
+listen.group = www
+listen.mode = 0666
+user = www
+group = www
+pm = dynamic
+pm.max_children = 5
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+pm.max_requests = 1024
+pm.process_idle_timeout = 10s
+request_terminate_timeout = 0
+request_slowlog_timeout = 5s
+slowlog = /usr/local/php/var/log/slow.log
+EOF
+
+  if [[ "$php_version" =~ ^8\.5\. ]]; then
+    cat <<'EOF' > /usr/local/php/etc/php.ini
+extension=swoole.so
+extension=inotify.so
+extension=redis.so
+extension=apcu.so
+[PHP]
+engine = On
+short_open_tag = Off
+memory_limit = 1G
+max_execution_time = 300
+upload_max_filesize = 10G
+post_max_size = 10G
+upload_tmp_dir = /data/php_upload_tmp
+allow_url_fopen = Off
+allow_url_include = Off
+[Pdo_mysql]
+pdo_mysql.default_socket=/run/mariadb/mariadb.sock
+[MySQLi]
+mysqli.default_socket = /run/mariadb/mariadb.sock
+[opcache]
+opcache.enable=1
+opcache.enable_cli=1
+EOF
+  else
+    cat <<'EOF' > /usr/local/php/etc/php.ini
+extension=swoole.so
+extension=inotify.so
+extension=redis.so
+extension=apcu.so
+zend_extension=opcache
+[PHP]
+engine = On
+short_open_tag = Off
+memory_limit = 1G
+max_execution_time = 300
+upload_max_filesize = 10G
+post_max_size = 10G
+upload_tmp_dir = /data/php_upload_tmp
+allow_url_fopen = Off
+allow_url_include = Off
+[Pdo_mysql]
+pdo_mysql.default_socket=/run/mariadb/mariadb.sock
+[MySQLi]
+mysqli.default_socket = /run/mariadb/mariadb.sock
+[opcache]
+opcache.enable=1
+opcache.enable_cli=1
+EOF
+  fi
+
+  wnmp_restore_php_ini_backup "$(wnmp_resolve_php_ini_backup)" "[update]"
+
+  systemctl enable php-fpm
+  systemctl start php-fpm
+
+  cd "$WNMPDIR"
+  if [ ! -f "pie.phar" ]; then
+    download_with_mirrors "https://github.com/php/pie/releases/latest/download/pie.phar" "$WNMPDIR/pie.phar"
+  fi
+  cp "$WNMPDIR"/pie.phar /usr/local/php/bin/pie && chmod +x /usr/local/php/bin/pie
+
+  rm -rf swoole-src
+  if [[ "$php_version" =~ ^8\.5\. ]]; then
+    if [ ! -f "$WNMPDIR/swoole.tar.gz" ]; then
+      download_with_mirrors "https://github.com/swoole/swoole-src/archive/master.tar.gz" "$WNMPDIR/swoole.tar.gz"
+    fi
+  else
+    if [ ! -f "$WNMPDIR/swoole.tar.gz" ]; then
+      download_with_mirrors "https://github.com/swoole/swoole-src/archive/refs/tags/v6.1.4.tar.gz" "$WNMPDIR/swoole.tar.gz"
+    fi
+  fi
+
+  tar zxvf ./swoole.tar.gz
+  mv swoole-src* swoole-src
+  cd swoole-src
+  phpize
+  ./configure --with-php-config=/usr/local/php/bin/php-config \
+    --enable-openssl --enable-mysqlnd --enable-swoole-curl --enable-cares --enable-iouring --enable-zstd
+  make && make install
+
+  /usr/local/php/bin/pie install phpredis/phpredis
+  /usr/local/php/bin/pie install arnaud-lb/inotify
+  /usr/local/php/bin/pie install apcu/apcu
+  systemctl restart php-fpm
+  php -v
+  echo "[update] PHP update completed."
+}
+
+wnmp_update_prepare_proxy() {
+  echo "[update] Select proxy tunnel before update..."
+  enable_proxy
+
+  if [[ "${PROXY_MODE:-}" != "DIRECT" ]]; then
+    if ! proxy_healthcheck; then
+      echo "[update][ERROR] Proxy tunnel health check failed."
+      return 1
+    fi
+  fi
+}
+
+wnmp_update_cleanup_proxy() {
+  echo "[update] Clean up proxy tunnel..."
+  disable_proxy
+}
+
+wnmp_update() {
+  local target="${1:-}"
+  case "$target" in
+    nginx|php) ;;
+    *) echo "Usage: wnmp update nginx|php"; return 1 ;;
+  esac
+
+  trap 'wnmp_update_cleanup_proxy' EXIT
+  wnmp_update_prepare_proxy
+
+  case "$target" in
+    nginx) wnmp_update_nginx ;;
+    php) wnmp_update_php ;;
+  esac
+}
+
 cf() {
   set -e
 
@@ -3630,6 +4132,7 @@ for arg in "$@"; do
      -h|--help|help) usage; exit 0 ;;
      restart) restart; exit 0 ;;
      status) status; exit 0 ;;
+     update) shift; if wnmp_update "${1:-}"; then exit 0; else exit 1; fi ;;
      webdav) shift; if webdav "${1:-}"; then exit 0; else exit 1; fi ;;
      sshkey) sshkey; exit 0 ;;
      remove) remove; exit 0 ;;
@@ -3652,6 +4155,7 @@ is_lan
 detect_cn_ip || true
 aptinit
 
+trap 'disable_proxy' EXIT
 enable_proxy
 
 if [[ "${PROXY_MODE:-}" != "DIRECT" ]]; then
@@ -4079,6 +4583,7 @@ apc.enable_cli=1
 EOF
 fi
 
+  wnmp_restore_php_ini_backup "$(wnmp_resolve_php_ini_backup)" "[install]"
 
   systemctl enable php-fpm
   systemctl start php-fpm
@@ -5256,6 +5761,8 @@ fi
       acme.sh --install-cert -d "$PUBLIC_IP" --ecc --key-file  /usr/local/nginx/ssl/default/key.pem  --fullchain-file /usr/local/nginx/ssl/default/cert.pem  || true
     fi
 
+    wnmp_restore_nginx_backup "$(wnmp_resolve_nginx_backup)" "[install]"
+
     systemctl daemon-reload
     systemctl enable nginx
     systemctl start nginx
@@ -5596,6 +6103,7 @@ auto_optimize_services() {
   echo "================= Optimization Complete ================="
 }
 
+trap - EXIT
 disable_proxy
 
 auto_optimize_services
