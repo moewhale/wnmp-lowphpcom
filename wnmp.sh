@@ -478,8 +478,16 @@ git_clone_wnmp() {
   local low_time=30
  
   local -a GIT_ENV=()
+  local -a GIT_PROXY_CONFIG=()
+  local git_proxy=""
   if [[ "${PROXY_MODE:-}" == "DIRECT" || "${IS_CN:-0}" -eq 0 ]]; then
     GIT_ENV=(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy)
+    GIT_PROXY_CONFIG=(-c http.proxy= -c https.proxy=)
+  else
+    git_proxy="${ALL_PROXY:-${all_proxy:-${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}}}"
+    git_proxy="${git_proxy:-socks5h://127.0.0.1:32000}"
+    GIT_ENV=(env "http_proxy=$git_proxy" "https_proxy=$git_proxy" "HTTP_PROXY=$git_proxy" "HTTPS_PROXY=$git_proxy" "ALL_PROXY=$git_proxy" "all_proxy=$git_proxy")
+    GIT_PROXY_CONFIG=(-c "http.proxy=$git_proxy" -c "https.proxy=$git_proxy")
   fi
 
   local repo_norm="${repo%/}"
@@ -527,7 +535,7 @@ git_clone_wnmp() {
 
     if command -v timeout >/dev/null 2>&1; then
       "${GIT_ENV[@]}" timeout "$timeout_s" git \
-        -c http.proxy= -c https.proxy= \
+        "${GIT_PROXY_CONFIG[@]}" \
         -c http.lowSpeedLimit="$low_speed" \
         -c http.lowSpeedTime="$low_time" \
         -c http.postBuffer=524288000 \
@@ -535,7 +543,7 @@ git_clone_wnmp() {
         clone --depth="$depth" "$src" ${dir:+ "$dir"}
     else
       "${GIT_ENV[@]}" git \
-        -c http.proxy= -c https.proxy= \
+        "${GIT_PROXY_CONFIG[@]}" \
         -c http.lowSpeedLimit="$low_speed" \
         -c http.lowSpeedTime="$low_time" \
         -c http.postBuffer=524288000 \
@@ -562,7 +570,7 @@ git_clone_wnmp() {
     for br in master main; do
       local url="https://codeload.github.com/${owner_repo}/zip/refs/heads/${br}"
       echo "[git] zip fallback: $url"
-      if curl -fL --connect-timeout 10 --max-time 180 -o "$tmpzip" "$url"; then
+      if "${GIT_ENV[@]}" curl -fL --connect-timeout 10 --max-time 180 -o "$tmpzip" "$url"; then
         unzip -q "$tmpzip" -d "$tmpdir" || continue
         local srcdir
         srcdir="$(find "$tmpdir" -maxdepth 1 -type d -name "*-${br}" | head -n1)"
