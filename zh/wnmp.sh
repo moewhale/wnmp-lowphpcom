@@ -3012,6 +3012,68 @@ EOF
 
 MYSQL_PASS='needpasswd'
 
+wnmp_mysql_pass_configured() {
+  local pass="${MYSQL_PASS:-}"
+  [ -n "$pass" ] && [ "$pass" != "needpasswd" ]
+}
+
+wnmp_prompt_mysql_password() {
+  local pass1 pass2
+
+  while :; do
+    read -rsp "请设置phpmyadmin 访问密码: " pass1
+    echo
+
+    if [ -z "$pass1" ]; then
+      echo "[passwd][ERROR] 密码不能为空。"
+      continue
+    fi
+
+    if [ "$pass1" = "needpasswd" ]; then
+      echo "[passwd][ERROR] 不允许继续使用默认密码 needpasswd。"
+      continue
+    fi
+
+    if [[ "$pass1" == *"'"* ]]; then
+      echo "[passwd][ERROR] 密码暂不支持英文单引号。"
+      continue
+    fi
+
+    read -rsp "请再次输入密码确认: " pass2
+    echo
+
+    if [ "$pass1" != "$pass2" ]; then
+      echo "[passwd][ERROR] 两次输入的密码不一致。"
+      continue
+    fi
+
+    MYSQL_PASS="$pass1"
+    return 0
+  done
+}
+
+wnmp_ensure_nginx_auth_password() {
+  if ! wnmp_mysql_pass_configured; then
+    echo "[nginx] 未检测到有效的 phpmyadmin 访问密码，请先设置后再继续。"
+    wnmp_prompt_mysql_password || return 1
+  fi
+
+  if ! command -v htpasswd >/dev/null 2>&1; then
+    echo "[nginx][ERROR] 未找到 htpasswd 命令，请先安装 apache2-utils。"
+    return 1
+  fi
+
+  mkdir -p /home/passwd
+  if ! htpasswd -bc /home/passwd/.default wnmp "$MYSQL_PASS" >/dev/null; then
+    echo "[nginx][ERROR] 写入 /home/passwd/.default 失败。"
+    return 1
+  fi
+
+  chown -R www:www /home/passwd 2>/dev/null || true
+  chmod 640 /home/passwd/.default 2>/dev/null || true
+  echo "[nginx] 默认认证密码已设置。"
+}
+
 
 CORES=$(nproc)
 MAX=$(( $(grep MemTotal /proc/meminfo | awk '{print int($2/1024/1024)}') / 1 ))
@@ -3466,8 +3528,9 @@ wnmp_read_update_version() {
   local example="$2"
   local version=""
 
-  read -rp "请输入 ${name} 版本号 [例如: ${example}]: " version
+  read -rp "请输入 ${name} 版本号 [默认: ${example}]: " version
   version="${version//[[:space:]]/}"
+  version="${version:-$example}"
   if ! wnmp_validate_version "$version"; then
     echo "[update][ERROR] ${name} 版本号无效：${version}"
     return 1
@@ -3526,12 +3589,17 @@ wnmp_update_nginx() {
   old_nginx_version="$(wnmp_current_nginx_version)"
   echo "[update] 当前 Nginx 版本：${old_nginx_version}"
 
-  nginx_version="$(wnmp_read_update_version "Nginx" "1.31.0")" || return 1
-  echo "[update] 开始升级 Nginx 到 ${nginx_version}"
-  backup_nginx_config || true
+  nginx_version="$(wnmp_read_update_version "Nginx" "1.31.1")" || return 1
+  if ! wnmp_mysql_pass_configured; then
+    echo "[nginx] 未检测到有效的 phpmyadmin 访问密码，请先设置后再继续。"
+    wnmp_prompt_mysql_password || return 1
+  fi
   wnmp_install_build_deps
   ensure_group www
   ensure_user www www
+  wnmp_ensure_nginx_auth_password || return 1
+  echo "[update] 开始升级 Nginx 到 ${nginx_version}"
+  backup_nginx_config || true
 
   cd "$WNMPDIR"
   local nginx_tar="nginx-${nginx_version}.tar.gz"
@@ -4387,8 +4455,7 @@ select mariadbselcect in "不安装mariadb" "1GB内存10.6" "2GB以上内存10.1
   esac
 done
 if [ "$mariadb_version" != "0" ]; then
-  read -p "请输入要设置的 MySQL root 密码 [默认: needpasswd]: " MYSQL_PASS
-  MYSQL_PASS=${MYSQL_PASS:-needpasswd}
+  wnmp_prompt_mysql_password || exit 1
 fi
 read -rp "是否安装NGINX？(y/n): " choosenginx
 
@@ -4766,6 +4833,7 @@ fi
 
 case "$choosenginx" in
   y|Y|yes|YES|Yes)
+    wnmp_ensure_nginx_auth_password || exit 1
     purge_nginx || true
     cd "$WNMPDIR"
     apt-get install -y cron curl socat tar coreutils
@@ -4795,9 +4863,6 @@ case "$choosenginx" in
 
     mkdir -p /home/wwwroot/default
     mkdir -p /home/wwwlogs
-    mkdir -p /home/passwd
-    htpasswd -bc /home/passwd/.default wnmp "${MYSQL_PASS:-needpasswd}"
-    chown -R www:www /home/passwd
     chown -R www:www /home/wwwroot
     chown -R www:www /home/wwwlogs
 
@@ -4805,7 +4870,7 @@ case "$choosenginx" in
 
     if [ ! -f "$WNMPDIR/nginx.tar.gz" ]; then
       rm -rf nginx
-      download_with_mirrors "https://nginx.org/download/nginx-1.31.0.tar.gz" "$WNMPDIR/nginx.tar.gz"
+      download_with_mirrors "https://nginx.org/download/nginx-1.31.1.tar.gz" "$WNMPDIR/nginx.tar.gz"
       mkdir -p tmp && tar zxf nginx.tar.gz -C tmp && mv tmp/* nginx && rm -rf tmp
       
       cd nginx

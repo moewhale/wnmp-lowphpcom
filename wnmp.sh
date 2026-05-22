@@ -3011,6 +3011,68 @@ EOF
 
 MYSQL_PASS='needpasswd'
 
+wnmp_mysql_pass_configured() {
+  local pass="${MYSQL_PASS:-}"
+  [ -n "$pass" ] && [ "$pass" != "needpasswd" ]
+}
+
+wnmp_prompt_mysql_password() {
+  local pass1 pass2
+
+  while :; do
+    read -rsp "请设置phpmyadmin 访问密码: " pass1
+    echo
+
+    if [ -z "$pass1" ]; then
+      echo "[passwd][ERROR] Password cannot be empty."
+      continue
+    fi
+
+    if [ "$pass1" = "needpasswd" ]; then
+      echo "[passwd][ERROR] The default password 'needpasswd' is not allowed."
+      continue
+    fi
+
+    if [[ "$pass1" == *"'"* ]]; then
+      echo "[passwd][ERROR] Single quotes are not supported in this password."
+      continue
+    fi
+
+    read -rsp "Please confirm the password: " pass2
+    echo
+
+    if [ "$pass1" != "$pass2" ]; then
+      echo "[passwd][ERROR] Passwords do not match."
+      continue
+    fi
+
+    MYSQL_PASS="$pass1"
+    return 0
+  done
+}
+
+wnmp_ensure_nginx_auth_password() {
+  if ! wnmp_mysql_pass_configured; then
+    echo "[nginx] 未检测到有效的 phpmyadmin 访问密码，请先设置后再继续。"
+    wnmp_prompt_mysql_password || return 1
+  fi
+
+  if ! command -v htpasswd >/dev/null 2>&1; then
+    echo "[nginx][ERROR] htpasswd command not found. Please install apache2-utils first."
+    return 1
+  fi
+
+  mkdir -p /home/passwd
+  if ! htpasswd -bc /home/passwd/.default wnmp "$MYSQL_PASS" >/dev/null; then
+    echo "[nginx][ERROR] Failed to write /home/passwd/.default."
+    return 1
+  fi
+
+  chown -R www:www /home/passwd 2>/dev/null || true
+  chmod 640 /home/passwd/.default 2>/dev/null || true
+  echo "[nginx] Default auth password configured."
+}
+
 
 CORES=$(nproc)
 MAX=$(( $(grep MemTotal /proc/meminfo | awk '{print int($2/1024/1024)}') / 1 ))
@@ -3465,8 +3527,9 @@ wnmp_read_update_version() {
   local example="$2"
   local version=""
 
-  read -rp "Please enter ${name} version [example: ${example}]: " version
+  read -rp "Please enter ${name} version [default: ${example}]: " version
   version="${version//[[:space:]]/}"
+  version="${version:-$example}"
   if ! wnmp_validate_version "$version"; then
     echo "[update][ERROR] Invalid ${name} version: ${version}"
     return 1
@@ -3525,12 +3588,17 @@ wnmp_update_nginx() {
   old_nginx_version="$(wnmp_current_nginx_version)"
   echo "[update] Current Nginx version: ${old_nginx_version}"
 
-  nginx_version="$(wnmp_read_update_version "Nginx" "1.31.0")" || return 1
-  echo "[update] Start updating Nginx to ${nginx_version}"
-  backup_nginx_config || true
+  nginx_version="$(wnmp_read_update_version "Nginx" "1.31.1")" || return 1
+  if ! wnmp_mysql_pass_configured; then
+    echo "[nginx] 未检测到有效的 phpmyadmin 访问密码，请先设置后再继续。"
+    wnmp_prompt_mysql_password || return 1
+  fi
   wnmp_install_build_deps
   ensure_group www
   ensure_user www www
+  wnmp_ensure_nginx_auth_password || return 1
+  echo "[update] Start updating Nginx to ${nginx_version}"
+  backup_nginx_config || true
 
   cd "$WNMPDIR"
   local nginx_tar="nginx-${nginx_version}.tar.gz"
@@ -4386,8 +4454,7 @@ select mariadbselcect in "Do not install MariaDB" "1GB RAM 10.6" "2GB RAM 10.11"
   esac
 done
 if [ "$mariadb_version" != "0" ]; then
-  read -p "Please enter the MySQL root password to set [default: needpasswd]: " MYSQL_PASS
-  MYSQL_PASS=${MYSQL_PASS:-needpasswd}
+  wnmp_prompt_mysql_password || exit 1
 fi
 read -rp "Is NGINX installed?(y/n): " choosenginx
 
@@ -4765,6 +4832,7 @@ fi
 
 case "$choosenginx" in
   y|Y|yes|YES|Yes)
+    wnmp_ensure_nginx_auth_password || exit 1
     purge_nginx || true
     cd "$WNMPDIR"
     apt-get install -y cron curl socat tar
@@ -4794,9 +4862,6 @@ case "$choosenginx" in
 
     mkdir -p /home/wwwroot/default
     mkdir -p /home/wwwlogs
-    mkdir -p /home/passwd
-    htpasswd -bc /home/passwd/.default wnmp "${MYSQL_PASS:-needpasswd}"
-    chown -R www:www /home/passwd
     chown -R www:www /home/wwwroot
     chown -R www:www /home/wwwlogs
 
@@ -4804,7 +4869,7 @@ case "$choosenginx" in
 
     if [ ! -f "$WNMPDIR/nginx.tar.gz" ]; then
       rm -rf nginx
-      download_with_mirrors "https://nginx.org/download/nginx-1.31.0.tar.gz" "$WNMPDIR/nginx.tar.gz"
+      download_with_mirrors "https://nginx.org/download/nginx-1.31.1.tar.gz" "$WNMPDIR/nginx.tar.gz"
       mkdir -p tmp && tar zxf nginx.tar.gz -C tmp && mv tmp/* nginx && rm -rf tmp
       
       cd nginx
