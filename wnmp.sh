@@ -3,7 +3,7 @@
 # Copyright (C) 2026 wnmp.org
 # Website: https://wnmp.org
 # License: GNU General Public License v3.0 (GPLv3)
-# Version: 1.44
+# Version: 1.45
 
 set -euo pipefail
 
@@ -64,7 +64,7 @@ green  " [init] WNMP one-click installer started"
 green  " [init] https://wnmp.org"
 green  " [init] Logs saved to: ${LOGFILE}"
 green  " [init] Start time: $(date '+%F %T')"
-green  " [init] Version: 1.44"
+green  " [init] Version: 1.45"
 green  "============================================================"
 echo
 sleep 1
