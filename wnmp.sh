@@ -4444,12 +4444,12 @@ done
 echo "Please select the MariaDB version.:"
 mariadbselcect=''
 mariadb_version='0'
-select mariadbselcect in "Do not install MariaDB" "1GB RAM 10.6" "2GB RAM 10.11" "4GB RAM 11.8.5"; do
+select mariadbselcect in "Do not install MariaDB" "1GB RAM 10.6" "2GB RAM 10.11" "4GB RAM 11.8.8"; do
   case $mariadbselcect in
     "Do not install MariaDB") mariadb_version='0'; break ;;
-    "1GB RAM 10.6") mariadb_version='10.6.24'; break ;;
-    "2GB RAM 10.11") mariadb_version='10.11.15'; break ;;
-    "4GB RAM 11.8.5") mariadb_version='11.8.5'; break ;;
+    "1GB RAM 10.6") mariadb_version='10.6.27'; break ;;
+    "2GB RAM 10.11") mariadb_version='10.11.18'; break ;;
+    "4GB RAM 11.8.8") mariadb_version='11.8.8'; break ;;
     *) echo "Invalid option $REPLY";;
   esac
 done
