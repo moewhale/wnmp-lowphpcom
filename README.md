@@ -38,6 +38,8 @@ Therefore, WNMP is recommended for use on KVM virtual machines, cloud servers, o
 
 ## Update Log
 
+v1.47 2026-06-17 nginx-1.30.3 stable and nginx-1.31.2 mainline versions have been released, with fixes for buffer overflow vulnerability in the ngx_http_proxy_v2_module and ngx_http_grpc_module (CVE-2026-42055), and buffer overread vulnerability in the ngx_http_charset_module (CVE-2026-48142). Additionally, nginx-1.31.2 includes a fix for use-after-free vulnerability in the ngx_http_v3_module (CVE-2026-42530).
+
 v1.46 2026-06-07 PHP version updated to 8.5.7, 8.4.22.
 
 v1.45 2026-05-22 Updated the default Nginx version to nginx-1.31.1. According to the official Nginx release notes, nginx-1.30.2 stable and nginx-1.31.1 mainline were released with a fix for the buffer overflow vulnerability in ngx_http_rewrite_module (CVE-2026-9256). `wnmp update nginx` also defaults to nginx-1.31.1 when no target version is entered. Standalone Nginx installation and update now require setting the phpMyAdmin access password before continuing; the default account remains `wnmp`, and the old `needpasswd` fallback is no longer used.
