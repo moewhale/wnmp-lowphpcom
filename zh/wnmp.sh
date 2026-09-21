@@ -3,7 +3,8 @@
 # Copyright (C) 2026 wnmp.org
 # Website: https://wnmp.org
 # License: GNU General Public License v3.0 (GPLv3)
-# Version: 1.61
+# Version: 1.62
+# v1.62 2026-09-21 加固 PHP 和 Nginx 组件升级流程。现在会先确认远端资源返回 HTTP 200，完整下载并验证 tar.gz 压缩包可读取，然后才允许清理旧 PHP 或 Nginx 更新工作目录。版本号错误时会友好提示并保留已安装组件；下载、解压、配置、编译、安装及安装后检查失败时会正确返回错误，不再误报升级完成。
 # v1.61 2026-09-18 更新生成的 Nginx block.conf 安全规则。默认规则现在统一拦截异常双斜杠请求、敏感文件和目录、备份及数据库文件、PHPUnit 和 storage 路径、常见 WebShell 入口、目录遍历和编码后的目录遍历请求，并关闭被拦截请求的访问日志。
 # Language channel: zh
 WNMP_LANG="zh"
@@ -68,7 +69,7 @@ green  " [init] WNMP one-click installer started"
 green  " [init] https://wnmp.org"
 green  " [init] Logs saved to: ${LOGFILE}"
 green  " [init] Start time: $(date '+%F %T')"
-  green  " [init] Version: 1.61"
+  green  " [init] Version: 1.62"
 green  "============================================================"
 echo
 sleep 1
@@ -1350,7 +1351,7 @@ enable_proxy() {
   local SSH_HOSTS=(
     "51.68.174.84"
     "85.121.48.221"
-    "157.254.234.252"
+    "107.173.85.103"
   )
 
   local LOCAL_BIND="127.0.0.1"
@@ -4631,6 +4632,84 @@ wnmp_read_update_version() {
   printf '%s\n' "$version"
 }
 
+# 在更新前查询远端资源的最终 HTTP 状态码。
+# 只有资源存在并且已完整下载，才允许清理当前组件。
+wnmp_remote_http_status() {
+  local url="$1"
+  local status=""
+
+  if command -v curl >/dev/null 2>&1; then
+    if [[ "${PROXY_MODE:-}" == "DIRECT" ]]; then
+      status="$({
+        env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+          -u ALL_PROXY -u all_proxy \
+          curl -A 'Mozilla/5.0' -sSIL --proxy '' --noproxy '*' \
+            --connect-timeout 10 --max-time 30 -o /dev/null \
+            -w '\n%{http_code}\n' "$url"
+      } 2>/dev/null || true)"
+      status="$(printf '%s\n' "$status" | sed '/^[[:space:]]*$/d' | tail -n1)"
+    elif proxy_healthcheck 2>/dev/null; then
+      status="$(curl -A 'Mozilla/5.0' -sSIL \
+        --socks5-hostname 127.0.0.1:32000 \
+        --connect-timeout 10 --max-time 30 -o /dev/null \
+        -w '\n%{http_code}\n' "$url" 2>/dev/null || true)"
+      status="$(printf '%s\n' "$status" | sed '/^[[:space:]]*$/d' | tail -n1)"
+    else
+      status="$({
+        env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+          -u ALL_PROXY -u all_proxy \
+          curl -A 'Mozilla/5.0' -sSIL --proxy '' --noproxy '*' \
+            --connect-timeout 10 --max-time 30 -o /dev/null \
+            -w '\n%{http_code}\n' "$url"
+      } 2>/dev/null || true)"
+      status="$(printf '%s\n' "$status" | sed '/^[[:space:]]*$/d' | tail -n1)"
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    status="$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+      -u ALL_PROXY -u all_proxy \
+      wget --spider --server-response --max-redirect=20 \
+        --timeout=10 --tries=2 --no-proxy "$url" 2>&1 \
+      | awk '/HTTP\/[0-9.]+[[:space:]]+[0-9]+/{code=$2} END{print code}' \
+      | tr -d '\r' || true)"
+  fi
+
+  printf '%s\n' "${status:-000}"
+}
+
+# 先校验并下载更新包，再由调用方清理旧版本。
+wnmp_prepare_update_archive() {
+  local name="$1"
+  local version="$2"
+  local url="$3"
+  local out="$4"
+  local status
+
+  status="$(wnmp_remote_http_status "$url")"
+  if [[ "$status" != "200" ]]; then
+    if [[ "$status" =~ ^[0-9]{3}$ && "$status" != "000" ]]; then
+      echo "[update][ERROR] ${name} ${version} 版本号资源不存在（HTTP ${status}），请输入正确的版本号。"
+    else
+      echo "[update][ERROR] 无法验证 ${name} ${version} 版本资源，请检查网络后重试。旧版本未删除。"
+    fi
+    return 1
+  fi
+
+  if ! download_with_mirrors "$url" "$out" "${name} download"; then
+    echo "[update][ERROR] ${name} ${version} 资源下载失败，旧版本未删除。"
+    return 1
+  fi
+  if [[ ! -s "$out" ]]; then
+    echo "[update][ERROR] ${name} ${version} 资源下载结果为空，旧版本未删除。"
+    return 1
+  fi
+  if ! tar -tzf "$out" >/dev/null 2>&1; then
+    echo "[update][ERROR] ${name} ${version} 下载包无效或不完整，旧版本未删除。"
+    return 1
+  fi
+
+  return 0
+}
+
 wnmp_current_nginx_version() {
   local out version
 
@@ -4682,7 +4761,18 @@ wnmp_update_nginx() {
   echo "[update] 当前 Nginx 版本：${old_nginx_version}"
 
   nginx_version="$(wnmp_read_update_version "Nginx" "1.31.6")" || return 1
-  wnmp_install_build_deps
+  local nginx_tar="nginx-${nginx_version}.tar.gz"
+  local nginx_dir="nginx-${nginx_version}"
+  local nginx_url="https://nginx.org/download/${nginx_tar}"
+
+  if ! wnmp_prepare_update_archive "Nginx" "$nginx_version" "$nginx_url" "$WNMPDIR/$nginx_tar"; then
+    return 1
+  fi
+
+  if ! wnmp_install_build_deps; then
+    echo "[update][ERROR] Nginx 构建依赖安装失败，旧版本未删除。"
+    return 1
+  fi
   if wnmp_phpmyadmin_installed; then
     wnmp_ensure_nginx_auth_password || return 1
   fi
@@ -4692,17 +4782,19 @@ wnmp_update_nginx() {
   backup_nginx_config || true
 
   cd "$WNMPDIR"
-  local nginx_tar="nginx-${nginx_version}.tar.gz"
-  local nginx_dir="nginx-${nginx_version}"
   rm -rf "$nginx_dir" nginx nginx-dav-ext-module tmp
 
-  if [ ! -f "$nginx_tar" ]; then
-    download_with_mirrors "https://nginx.org/download/${nginx_tar}" "$WNMPDIR/$nginx_tar"
-  fi
-
   mkdir -p tmp
-  tar zxf "$nginx_tar" -C tmp
-  mv tmp/* "$nginx_dir"
+  if ! tar zxf "$nginx_tar" -C tmp; then
+    echo "[update][ERROR] Nginx 源码包解压失败，旧版本未删除。"
+    rm -rf tmp
+    return 1
+  fi
+  if ! mv tmp/* "$nginx_dir"; then
+    echo "[update][ERROR] Nginx 源码目录准备失败，旧版本未删除。"
+    rm -rf tmp
+    return 1
+  fi
   rm -rf tmp
   cd "$nginx_dir"
 
@@ -4710,7 +4802,7 @@ wnmp_update_nginx() {
   git_clone_wnmp https://github.com/arut/nginx-dav-ext-module.git
   make clean || true
 
-  ./configure \
+  if ! ./configure \
     --prefix=/usr/local/nginx \
     --user=www \
     --group=www \
@@ -4748,16 +4840,28 @@ wnmp_update_nginx() {
     --with-http_mp4_module \
     --with-cc-opt="-O2 -pipe -fstack-protector-strong -fPIC -Wformat -Werror=format-security" \
     --with-ld-opt="-Wl,-z,relro -Wl,-z,now -Wl,--as-needed" \
-    --add-module=./nginx-dav-ext-module
+    --add-module=./nginx-dav-ext-module; then
+    echo "[update][ERROR] Nginx 配置检查失败，旧版本未删除。"
+    return 1
+  fi
 
-  make -j${JOBS}
+  if ! make -j${JOBS}; then
+    echo "[update][ERROR] Nginx 编译失败，旧版本未删除。"
+    return 1
+  fi
   systemctl stop nginx 2>/dev/null || true
-  make install
+  if ! make install; then
+    echo "[update][ERROR] Nginx 安装失败，旧版本未删除。"
+    return 1
+  fi
   wnmp_restore_nginx_backup "$(wnmp_resolve_nginx_backup)" "[update]"
   strip /usr/local/nginx/sbin/nginx || true
   systemctl daemon-reload || true
   systemctl restart nginx 2>/dev/null || /usr/local/nginx/sbin/nginx
-  nginx -v
+  if ! nginx -v; then
+    echo "[update][ERROR] Nginx 安装后版本检查失败。"
+    return 1
+  fi
   echo "[update] Nginx 升级完成。"
 }
 
@@ -4767,25 +4871,37 @@ wnmp_update_php() {
   echo "[update] 当前 PHP 版本：${old_php_version}"
 
   php_version="$(wnmp_read_update_version "PHP" "8.4.21")" || return 1
+
+  local php_tar="php-${php_version}.tar.gz"
+  local php_dir="php-${php_version}"
+  local php_url="https://www.php.net/distributions/${php_tar}"
+
+  if ! wnmp_prepare_update_archive "PHP" "$php_version" "$php_url" "$WNMPDIR/$php_tar"; then
+    return 1
+  fi
+
   echo "[update] 开始升级 PHP 到 ${php_version}"
   backup_php_config || true
-  wnmp_install_build_deps
+  if ! wnmp_install_build_deps; then
+    echo "[update][ERROR] PHP 构建依赖安装失败，旧版本未删除。"
+    return 1
+  fi
   ensure_group www
   ensure_user www www
 
   WNMP_SKIP_PHP_BACKUP=1 purge_php || true
 
   cd "$WNMPDIR"
-  local php_tar="php-${php_version}.tar.gz"
-  local php_dir="php-${php_version}"
   rm -rf "$php_dir"
 
-  if [ ! -f "$php_tar" ]; then
-    download_with_mirrors "https://www.php.net/distributions/${php_tar}" "$WNMPDIR/$php_tar"
+  if ! tar zxvf "$php_tar"; then
+    echo "[update][ERROR] PHP 源码包解压失败，旧版本已保留备份。"
+    return 1
   fi
-
-  tar zxvf "$php_tar"
-  cd "$php_dir"
+  if ! cd "$php_dir"; then
+    echo "[update][ERROR] PHP 源码目录准备失败，旧版本已保留备份。"
+    return 1
+  fi
   make distclean || true
 
   local PREFIX="/usr/local/php"
@@ -4834,9 +4950,18 @@ wnmp_update_php() {
     CONFIGURE_OPTS+=("--enable-opcache")
   fi
 
-  ./configure "${CONFIGURE_OPTS[@]}"
-  make -j${JOBS}
-  make install
+  if ! ./configure "${CONFIGURE_OPTS[@]}"; then
+    echo "[update][ERROR] PHP 配置检查失败。"
+    return 1
+  fi
+  if ! make -j${JOBS}; then
+    echo "[update][ERROR] PHP 编译失败。"
+    return 1
+  fi
+  if ! make install; then
+    echo "[update][ERROR] PHP 安装失败。"
+    return 1
+  fi
 
   find /usr/local/php -type f -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true
   strip /usr/local/php/bin/php 2>/dev/null || true

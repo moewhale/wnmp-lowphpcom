@@ -3,7 +3,8 @@
 # Copyright (C) 2026 wnmp.org
 # Website: https://wnmp.org
 # License: GNU General Public License v3.0 (GPLv3)
-# Version: 1.61
+# Version: 1.62
+# v1.62 2026-09-21 Hardened PHP and Nginx component upgrades. The requested source archive is now checked for HTTP 200, fully downloaded, and validated as a readable tar.gz before any PHP purge or Nginx update workspace cleanup begins. Invalid versions stop with a clear error and preserve the installed component. Download, extraction, configuration, compilation, installation, and post-install checks now return errors instead of reporting a false success.
 # v1.61 2026-09-18 Updated the generated Nginx block.conf security rules. The default rules now consistently block malformed double-slash requests, sensitive files and directories, backup and database artifacts, PHPUnit and storage paths, webshell entry points, directory traversal, and encoded traversal attempts, while disabling access logs for blocked requests.
 # Language channel: en
 WNMP_LANG="en"
@@ -68,7 +69,7 @@ green  " [init] WNMP one-click installer started"
 green  " [init] https://wnmp.org"
 green  " [init] Logs saved to: ${LOGFILE}"
 green  " [init] Start time: $(date '+%F %T')"
-  green  " [init] Version: 1.61"
+  green  " [init] Version: 1.62"
 green  "============================================================"
 echo
 sleep 1
@@ -1486,7 +1487,7 @@ enable_proxy() {
   local SSH_HOSTS=(
     "51.68.174.84"
     "85.121.48.221"
-    "157.254.234.252"
+    "107.173.85.103"
   )
 
   local LOCAL_BIND="127.0.0.1"
@@ -4784,6 +4785,86 @@ wnmp_read_update_version() {
   printf '%s\n' "$version"
 }
 
+# Return the final HTTP status for an update archive without downloading it.
+# The update path uses this before touching the currently installed component.
+wnmp_remote_http_status() {
+  local url="$1"
+  local status=""
+
+  if command -v curl >/dev/null 2>&1; then
+    if [[ "${PROXY_MODE:-}" == "DIRECT" ]]; then
+      status="$({
+        env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+          -u ALL_PROXY -u all_proxy \
+          curl -A 'Mozilla/5.0' -sSIL --proxy '' --noproxy '*' \
+            --connect-timeout 10 --max-time 30 -o /dev/null \
+            -w '\n%{http_code}\n' "$url"
+      } 2>/dev/null || true)"
+      status="$(printf '%s\n' "$status" | sed '/^[[:space:]]*$/d' | tail -n1)"
+    elif proxy_healthcheck 2>/dev/null; then
+      status="$(curl -A 'Mozilla/5.0' -sSIL \
+        --socks5-hostname 127.0.0.1:32000 \
+        --connect-timeout 10 --max-time 30 -o /dev/null \
+        -w '\n%{http_code}\n' "$url" 2>/dev/null || true)"
+      status="$(printf '%s\n' "$status" | sed '/^[[:space:]]*$/d' | tail -n1)"
+    else
+      status="$({
+        env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+          -u ALL_PROXY -u all_proxy \
+          curl -A 'Mozilla/5.0' -sSIL --proxy '' --noproxy '*' \
+            --connect-timeout 10 --max-time 30 -o /dev/null \
+            -w '\n%{http_code}\n' "$url"
+      } 2>/dev/null || true)"
+      status="$(printf '%s\n' "$status" | sed '/^[[:space:]]*$/d' | tail -n1)"
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    status="$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+      -u ALL_PROXY -u all_proxy \
+      wget --spider --server-response --max-redirect=20 \
+        --timeout=10 --tries=2 --no-proxy "$url" 2>&1 \
+      | awk '/HTTP\/[0-9.]+[[:space:]]+[0-9]+/{code=$2} END{print code}' \
+      | tr -d '\r' || true)"
+  fi
+
+  printf '%s\n' "${status:-000}"
+}
+
+# Validate and fully download an update archive before the old installation is
+# removed. The downloader writes to <out>.part and only replaces <out> after a
+# successful transfer.
+wnmp_prepare_update_archive() {
+  local name="$1"
+  local version="$2"
+  local url="$3"
+  local out="$4"
+  local status
+
+  status="$(wnmp_remote_http_status "$url")"
+  if [[ "$status" != "200" ]]; then
+    if [[ "$status" =~ ^[0-9]{3}$ && "$status" != "000" ]]; then
+      echo "[update][ERROR] ${name} ${version} archive was not found (HTTP ${status}); please enter a valid version."
+    else
+      echo "[update][ERROR] Could not verify the ${name} ${version} archive; check the network and try again. The old version was not removed."
+    fi
+    return 1
+  fi
+
+  if ! download_with_mirrors "$url" "$out" "${name} download"; then
+    echo "[update][ERROR] Failed to download the ${name} ${version} archive. The old version was not removed."
+    return 1
+  fi
+  if [[ ! -s "$out" ]]; then
+    echo "[update][ERROR] The downloaded ${name} ${version} archive is empty. The old version was not removed."
+    return 1
+  fi
+  if ! tar -tzf "$out" >/dev/null 2>&1; then
+    echo "[update][ERROR] The downloaded ${name} ${version} archive is invalid or incomplete. The old version was not removed."
+    return 1
+  fi
+
+  return 0
+}
+
 wnmp_current_nginx_version() {
   local out version
 
@@ -4835,7 +4916,20 @@ wnmp_update_nginx() {
   echo "[update] Current Nginx version: ${old_nginx_version}"
 
   nginx_version="$(wnmp_read_update_version "Nginx" "1.31.6")" || return 1
-  wnmp_install_build_deps
+  local nginx_tar="nginx-${nginx_version}.tar.gz"
+  local nginx_dir="nginx-${nginx_version}"
+  local nginx_url="https://nginx.org/download/${nginx_tar}"
+
+  # Do not stop or remove the current Nginx until the requested archive is
+  # confirmed by the server and downloaded successfully.
+  if ! wnmp_prepare_update_archive "Nginx" "$nginx_version" "$nginx_url" "$WNMPDIR/$nginx_tar"; then
+    return 1
+  fi
+
+  if ! wnmp_install_build_deps; then
+    echo "[update][ERROR] Failed to install Nginx build dependencies. The old version was not removed."
+    return 1
+  fi
   if wnmp_phpmyadmin_installed; then
     wnmp_ensure_nginx_auth_password || return 1
   fi
@@ -4845,17 +4939,19 @@ wnmp_update_nginx() {
   backup_nginx_config || true
 
   cd "$WNMPDIR"
-  local nginx_tar="nginx-${nginx_version}.tar.gz"
-  local nginx_dir="nginx-${nginx_version}"
   rm -rf "$nginx_dir" nginx nginx-dav-ext-module tmp
 
-  if [ ! -f "$nginx_tar" ]; then
-    download_with_mirrors "https://nginx.org/download/${nginx_tar}" "$WNMPDIR/$nginx_tar"
-  fi
-
   mkdir -p tmp
-  tar zxf "$nginx_tar" -C tmp
-  mv tmp/* "$nginx_dir"
+  if ! tar zxf "$nginx_tar" -C tmp; then
+    echo "[update][ERROR] Failed to extract the Nginx source archive. The old version was not removed."
+    rm -rf tmp
+    return 1
+  fi
+  if ! mv tmp/* "$nginx_dir"; then
+    echo "[update][ERROR] Failed to prepare the Nginx source directory. The old version was not removed."
+    rm -rf tmp
+    return 1
+  fi
   rm -rf tmp
   cd "$nginx_dir"
 
@@ -4863,7 +4959,7 @@ wnmp_update_nginx() {
   git_clone_wnmp https://github.com/arut/nginx-dav-ext-module.git
   make clean || true
 
-  ./configure \
+  if ! ./configure \
     --prefix=/usr/local/nginx \
     --user=www \
     --group=www \
@@ -4901,16 +4997,28 @@ wnmp_update_nginx() {
     --with-http_mp4_module \
     --with-cc-opt="-O2 -pipe -fstack-protector-strong -fPIC -Wformat -Werror=format-security" \
     --with-ld-opt="-Wl,-z,relro -Wl,-z,now -Wl,--as-needed" \
-    --add-module=./nginx-dav-ext-module
+    --add-module=./nginx-dav-ext-module; then
+    echo "[update][ERROR] Nginx configuration failed. The old version was not removed."
+    return 1
+  fi
 
-  make -j${JOBS}
+  if ! make -j${JOBS}; then
+    echo "[update][ERROR] Nginx compilation failed. The old version was not removed."
+    return 1
+  fi
   systemctl stop nginx 2>/dev/null || true
-  make install
+  if ! make install; then
+    echo "[update][ERROR] Nginx installation failed. The old version was not removed."
+    return 1
+  fi
   wnmp_restore_nginx_backup "$(wnmp_resolve_nginx_backup)" "[update]"
   strip /usr/local/nginx/sbin/nginx || true
   systemctl daemon-reload || true
   systemctl restart nginx 2>/dev/null || /usr/local/nginx/sbin/nginx
-  nginx -v
+  if ! nginx -v; then
+    echo "[update][ERROR] Nginx version check failed after installation."
+    return 1
+  fi
   echo "[update] Nginx update completed."
 }
 
@@ -4920,25 +5028,39 @@ wnmp_update_php() {
   echo "[update] Current PHP version: ${old_php_version}"
 
   php_version="$(wnmp_read_update_version "PHP" "8.4.21")" || return 1
+
+  local php_tar="php-${php_version}.tar.gz"
+  local php_dir="php-${php_version}"
+  local php_url="https://www.php.net/distributions/${php_tar}"
+
+  # Validate and download before purge_php so a typo such as 8.5 cannot remove
+  # the working PHP installation.
+  if ! wnmp_prepare_update_archive "PHP" "$php_version" "$php_url" "$WNMPDIR/$php_tar"; then
+    return 1
+  fi
+
   echo "[update] Start updating PHP to ${php_version}"
   backup_php_config || true
-  wnmp_install_build_deps
+  if ! wnmp_install_build_deps; then
+    echo "[update][ERROR] Failed to install PHP build dependencies. The old version was not removed."
+    return 1
+  fi
   ensure_group www
   ensure_user www www
 
   WNMP_SKIP_PHP_BACKUP=1 purge_php || true
 
   cd "$WNMPDIR"
-  local php_tar="php-${php_version}.tar.gz"
-  local php_dir="php-${php_version}"
   rm -rf "$php_dir"
 
-  if [ ! -f "$php_tar" ]; then
-    download_with_mirrors "https://www.php.net/distributions/${php_tar}" "$WNMPDIR/$php_tar"
+  if ! tar zxvf "$php_tar"; then
+    echo "[update][ERROR] Failed to extract the PHP source archive; the previous configuration backup is available."
+    return 1
   fi
-
-  tar zxvf "$php_tar"
-  cd "$php_dir"
+  if ! cd "$php_dir"; then
+    echo "[update][ERROR] Failed to prepare the PHP source directory; the previous configuration backup is available."
+    return 1
+  fi
   make distclean || true
 
   local PREFIX="/usr/local/php"
@@ -4987,9 +5109,18 @@ wnmp_update_php() {
     CONFIGURE_OPTS+=("--enable-opcache")
   fi
 
-  ./configure "${CONFIGURE_OPTS[@]}"
-  make -j${JOBS}
-  make install
+  if ! ./configure "${CONFIGURE_OPTS[@]}"; then
+    echo "[update][ERROR] PHP configuration failed."
+    return 1
+  fi
+  if ! make -j${JOBS}; then
+    echo "[update][ERROR] PHP compilation failed."
+    return 1
+  fi
+  if ! make install; then
+    echo "[update][ERROR] PHP installation failed."
+    return 1
+  fi
 
   find /usr/local/php -type f -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true
   strip /usr/local/php/bin/php 2>/dev/null || true
