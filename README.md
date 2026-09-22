@@ -43,6 +43,8 @@ Therefore, WNMP is recommended for use on KVM virtual machines, cloud servers, o
 
 ## Update Log
 
+v1.63 2026-09-22 Added a Time Management menu with system time synchronization and timezone settings. Time sync installs and enables `systemd-timesyncd`, then enables NTP; timezone settings default to `Asia/Shanghai` and accept custom IANA timezone values.
+
 v1.62 2026-09-21 Hardened PHP and Nginx component upgrades. The requested source archive is now checked for HTTP 200, fully downloaded, and validated as a readable `tar.gz` before any PHP purge or Nginx update workspace cleanup begins. Invalid versions such as PHP `8.5` now stop with a clear error and preserve the installed component. Download, extraction, configuration, compilation, installation, and post-install checks now return errors instead of reporting a false success.
 
 v1.61 2026-09-18 Updated the generated Nginx `block.conf` security rules. The default rules now consistently block malformed double-slash requests, sensitive files and directories, backup and database artifacts, PHPUnit and storage paths, webshell entry points, directory traversal, and encoded traversal attempts, while disabling access logs for blocked requests.

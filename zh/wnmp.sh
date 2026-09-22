@@ -3,8 +3,8 @@
 # Copyright (C) 2026 wnmp.org
 # Website: https://wnmp.org
 # License: GNU General Public License v3.0 (GPLv3)
-# Version: 1.62
-# v1.62 2026-09-21 加固 PHP 和 Nginx 组件升级流程。现在会先确认远端资源返回 HTTP 200，完整下载并验证 tar.gz 压缩包可读取，然后才允许清理旧 PHP 或 Nginx 更新工作目录。版本号错误时会友好提示并保留已安装组件；下载、解压、配置、编译、安装及安装后检查失败时会正确返回错误，不再误报升级完成。
+# Version: 1.63
+# v1.63 2026-09-22 新增时间管理菜单，提供系统时间同步和时区设置。时间同步会安装并启用 systemd-timesyncd 后开启 NTP；时区设置默认 Asia/Shanghai，并支持输入其他 IANA 时区。
 # v1.61 2026-09-18 更新生成的 Nginx block.conf 安全规则。默认规则现在统一拦截异常双斜杠请求、敏感文件和目录、备份及数据库文件、PHPUnit 和 storage 路径、常见 WebShell 入口、目录遍历和编码后的目录遍历请求，并关闭被拦截请求的访问日志。
 # Language channel: zh
 WNMP_LANG="zh"
@@ -69,7 +69,7 @@ green  " [init] WNMP one-click installer started"
 green  " [init] https://wnmp.org"
 green  " [init] Logs saved to: ${LOGFILE}"
 green  " [init] Start time: $(date '+%F %T')"
-  green  " [init] Version: 1.62"
+  green  " [init] Version: 1.63"
 green  "============================================================"
 echo
 sleep 1
@@ -107,6 +107,8 @@ usage() {
   wnmp ssltest       # 执行ssl检测
   wnmp cf            # 安装cloudflare 真实IP更新任务
   wnmp fail2ban      # 安装并配置 fail2ban
+  wnmp time sync     # 安装并启用系统时间同步
+  wnmp time timezone [地区/城市] # 设置系统时区（默认：Asia/Shanghai）
   wnmp -h|--help     # 查看帮助
 USAGE
 }
@@ -241,6 +243,65 @@ EOF
   journalctl -u fail2ban --no-pager -n 40 2>/dev/null || true
   return 1
 }
+
+time_sync() {
+  echo "[+] 正在安装并启用系统时间同步..."
+  apt update
+  apt install -y systemd-timesyncd
+  systemctl enable --now systemd-timesyncd
+  timedatectl set-ntp true
+  echo "[OK] 系统时间同步已启用。"
+  timedatectl status
+}
+
+set_timezone() {
+  local timezone="${1:-}"
+
+  if [[ -z "$timezone" ]]; then
+    local input=""
+    if [[ -r /dev/tty ]]; then
+      read -rp "请输入时区 [Asia/Shanghai]: " input </dev/tty || true
+    else
+      read -rp "请输入时区 [Asia/Shanghai]: " input || true
+    fi
+    timezone="${input:-Asia/Shanghai}"
+  fi
+
+  timedatectl set-timezone "$timezone"
+  echo "[OK] 时区已设置为：$timezone"
+  timedatectl status
+}
+
+time_management_menu() {
+  local choice=""
+
+  while true; do
+    echo
+    green "============================================================"
+    green " 时间管理"
+    green "============================================================"
+    timedatectl status 2>/dev/null || true
+    cat <<'TIME_MENU'
+  1) 时间同步（安装并启用 systemd-timesyncd）
+  2) 时区设置（默认：Asia/Shanghai）
+  0) 返回
+TIME_MENU
+    echo
+    if [[ -r /dev/tty ]]; then
+      read -rp "请选择 [0-2]: " choice </dev/tty || true
+    else
+      read -rp "请选择 [0-2]: " choice || true
+    fi
+
+    case "$choice" in
+      1) time_sync ;;
+      2) set_timezone ;;
+      0) return 0 ;;
+      *) echo "[setup] 无效选择: $choice" ;;
+    esac
+  done
+}
+
 ssl_certificate_menu() {
   while true; do
     echo
@@ -416,14 +477,15 @@ main_menu() {
  16) 安装并配置 fail2ban                 (wnmp fail2ban)
  17) Nginx 反向代理管理                  (wnmp proxy)
  18) 升级 WNMP 脚本本体                  (wnmp update / wnmp update force)
+ 19) 时间管理                           (wnmp time)
   0) 退出
 MENU
   echo
   local choice=""
   if [[ -r /dev/tty ]]; then
-      read -rp "请选择 [0-18]: " choice </dev/tty || true
+      read -rp "请选择 [0-19]: " choice </dev/tty || true
   else
-    read -rp "请选择 [0-18]: " choice || true
+    read -rp "请选择 [0-19]: " choice || true
   fi
 
   case "${choice}" in
@@ -445,6 +507,7 @@ MENU
     16) configure_fail2ban; exit 0 ;;
     17) reverse_proxy_menu; main_menu; exit 0 ;;
     18) wnmp_update; exit 0 ;;
+    19) time_management_menu; main_menu; exit 0 ;;
     0) echo "[info] 已退出。"; exit 0 ;;
     *) echo "[setup] 无效选择: ${choice}"; usage; exit 1 ;;
   esac
@@ -5999,6 +6062,15 @@ for arg in "$@"; do
      ssltest) wnmp_ssltest; exit 0 ;;
      cf) cf; exit 0 ;;
      fail2ban) configure_fail2ban; exit 0 ;;
+     time|timectl)
+       shift
+       case "${1:-}" in
+         "") time_management_menu; exit 0 ;;
+         sync) time_sync; exit 0 ;;
+         timezone|zone) shift; set_timezone "${1:-}"; exit 0 ;;
+         *) echo "[setup] 未知时间命令: ${1}"; usage; exit 1 ;;
+       esac
+       ;;
      "") ;;
      *) echo "[setup] Unknown parameter: ${arg}"; usage; exit 1 ;;
    esac

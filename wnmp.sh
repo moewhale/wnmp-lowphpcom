@@ -3,8 +3,8 @@
 # Copyright (C) 2026 wnmp.org
 # Website: https://wnmp.org
 # License: GNU General Public License v3.0 (GPLv3)
-# Version: 1.62
-# v1.62 2026-09-21 Hardened PHP and Nginx component upgrades. The requested source archive is now checked for HTTP 200, fully downloaded, and validated as a readable tar.gz before any PHP purge or Nginx update workspace cleanup begins. Invalid versions stop with a clear error and preserve the installed component. Download, extraction, configuration, compilation, installation, and post-install checks now return errors instead of reporting a false success.
+# Version: 1.63
+# v1.63 2026-09-22 Added a Time Management menu with system time synchronization and timezone settings. Time sync installs and enables systemd-timesyncd, then enables NTP; timezone settings default to Asia/Shanghai and accept custom IANA timezone values.
 # v1.61 2026-09-18 Updated the generated Nginx block.conf security rules. The default rules now consistently block malformed double-slash requests, sensitive files and directories, backup and database artifacts, PHPUnit and storage paths, webshell entry points, directory traversal, and encoded traversal attempts, while disabling access logs for blocked requests.
 # Language channel: en
 WNMP_LANG="en"
@@ -69,7 +69,7 @@ green  " [init] WNMP one-click installer started"
 green  " [init] https://wnmp.org"
 green  " [init] Logs saved to: ${LOGFILE}"
 green  " [init] Start time: $(date '+%F %T')"
-  green  " [init] Version: 1.62"
+  green  " [init] Version: 1.63"
 green  "============================================================"
 echo
 sleep 1
@@ -107,6 +107,8 @@ Usage:
   wnmp ssltest       # Perform SSL detection
   wnmp cf            # Install Cloudflare real IP update task
   wnmp fail2ban      # Install and configure fail2ban
+  wnmp time sync     # Install and enable system time synchronization
+  wnmp time timezone [Region/City] # Set the system timezone (default: Asia/Shanghai)
   wnmp -h|--help     # Show help
 USAGE
 }
@@ -377,6 +379,65 @@ EOF
   journalctl -u fail2ban --no-pager -n 40 2>/dev/null || true
   return 1
 }
+
+time_sync() {
+  echo "[+] Installing and enabling system time synchronization..."
+  apt update
+  apt install -y systemd-timesyncd
+  systemctl enable --now systemd-timesyncd
+  timedatectl set-ntp true
+  echo "[OK] System time synchronization is enabled."
+  timedatectl status
+}
+
+set_timezone() {
+  local timezone="${1:-}"
+
+  if [[ -z "$timezone" ]]; then
+    local input=""
+    if [[ -r /dev/tty ]]; then
+      read -rp "Timezone [Asia/Shanghai]: " input </dev/tty || true
+    else
+      read -rp "Timezone [Asia/Shanghai]: " input || true
+    fi
+    timezone="${input:-Asia/Shanghai}"
+  fi
+
+  timedatectl set-timezone "$timezone"
+  echo "[OK] Timezone set to: $timezone"
+  timedatectl status
+}
+
+time_management_menu() {
+  local choice=""
+
+  while true; do
+    echo
+    green "============================================================"
+    green " Time Management"
+    green "============================================================"
+    timedatectl status 2>/dev/null || true
+    cat <<'TIME_MENU'
+  1) Synchronize system time (install and enable systemd-timesyncd)
+  2) Set timezone (default: Asia/Shanghai)
+  0) Return
+TIME_MENU
+    echo
+    if [[ -r /dev/tty ]]; then
+      read -rp "Please select [0-2]: " choice </dev/tty || true
+    else
+      read -rp "Please select [0-2]: " choice || true
+    fi
+
+    case "$choice" in
+      1) time_sync ;;
+      2) set_timezone ;;
+      0) return 0 ;;
+      *) echo "[setup] Invalid selection: $choice" ;;
+    esac
+  done
+}
+
 ssl_certificate_menu() {
   while true; do
     echo
@@ -552,14 +613,15 @@ main_menu() {
  16) Install and configure fail2ban      (wnmp fail2ban)
  17) Nginx reverse proxy management      (wnmp proxy)
  18) Update WNMP script                  (wnmp update / wnmp update force)
+ 19) Time management                     (wnmp time)
   0) Exit
 MENU
   echo
   local choice=""
   if [[ -r /dev/tty ]]; then
-      read -rp "Please select [0-18]: " choice </dev/tty || true
+      read -rp "Please select [0-19]: " choice </dev/tty || true
   else
-      read -rp "Please select [0-18]: " choice || true
+      read -rp "Please select [0-19]: " choice || true
   fi
 
   case "${choice}" in
@@ -581,6 +643,7 @@ MENU
     16) configure_fail2ban; exit 0 ;;
     17) reverse_proxy_menu; main_menu; exit 0 ;;
     18) wnmp_update; exit 0 ;;
+    19) time_management_menu; main_menu; exit 0 ;;
     0) echo "[info] Bye."; exit 0 ;;
     *) echo "[setup] Invalid selection: ${choice}"; usage; exit 1 ;;
   esac
@@ -6158,6 +6221,15 @@ for arg in "$@"; do
      ssltest) wnmp_ssltest; exit 0 ;;
      cf) cf; exit 0 ;;
      fail2ban) configure_fail2ban; exit 0 ;;
+     time|timectl)
+       shift
+       case "${1:-}" in
+         "") time_management_menu; exit 0 ;;
+         sync) time_sync; exit 0 ;;
+         timezone|zone) shift; set_timezone "${1:-}"; exit 0 ;;
+         *) echo "[setup] Unknown time command: ${1}"; usage; exit 1 ;;
+       esac
+       ;;
      "") ;;
      *) echo "[setup] Unknown parameter: ${arg}"; usage; exit 1 ;;
    esac
