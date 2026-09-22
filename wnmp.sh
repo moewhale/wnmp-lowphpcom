@@ -384,10 +384,24 @@ time_sync() {
   echo "[+] Installing and enabling system time synchronization..."
   apt update
   apt install -y systemd-timesyncd
-  systemctl enable --now systemd-timesyncd
-  timedatectl set-ntp true
-  echo "[OK] System time synchronization is enabled."
-  timedatectl status
+  if ! systemctl enable --now systemd-timesyncd; then
+    red "[ERROR] Unable to enable systemd-timesyncd."
+    return 1
+  fi
+
+  local can_ntp=""
+  can_ntp="$(timedatectl show --property=CanNTP --value 2>/dev/null || true)"
+  if [[ "$can_ntp" == "yes" ]]; then
+    if timedatectl set-ntp true; then
+      echo "[OK] System time synchronization is enabled."
+    else
+      yellow "[WARN] Unable to enable NTP through timedatectl."
+    fi
+  else
+    yellow "[WARN] NTP is not controllable through timedatectl in this environment."
+    yellow "[INFO] This is common in containers or WSL without CAP_SYS_TIME; synchronize time from the host instead."
+  fi
+  timedatectl status || true
 }
 
 set_timezone() {

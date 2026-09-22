@@ -248,10 +248,24 @@ time_sync() {
   echo "[+] 正在安装并启用系统时间同步..."
   apt update
   apt install -y systemd-timesyncd
-  systemctl enable --now systemd-timesyncd
-  timedatectl set-ntp true
-  echo "[OK] 系统时间同步已启用。"
-  timedatectl status
+  if ! systemctl enable --now systemd-timesyncd; then
+    red "[ERROR] 无法启用 systemd-timesyncd。"
+    return 1
+  fi
+
+  local can_ntp=""
+  can_ntp="$(timedatectl show --property=CanNTP --value 2>/dev/null || true)"
+  if [[ "$can_ntp" == "yes" ]]; then
+    if timedatectl set-ntp true; then
+      echo "[OK] 系统时间同步已启用。"
+    else
+      yellow "[WARN] 无法通过 timedatectl 启用 NTP。"
+    fi
+  else
+    yellow "[WARN] 当前环境不支持通过 timedatectl 管理 NTP。"
+    yellow "[INFO] 容器或缺少 CAP_SYS_TIME 的 WSL 环境通常会出现此情况，请由宿主机同步时间。"
+  fi
+  timedatectl status || true
 }
 
 set_timezone() {
