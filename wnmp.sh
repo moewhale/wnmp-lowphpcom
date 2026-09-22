@@ -4,7 +4,7 @@
 # Website: https://wnmp.org
 # License: GNU General Public License v3.0 (GPLv3)
 # Version: 1.63
-# v1.63 2026-09-22 Added a Time Management menu with system time synchronization and timezone settings. Time sync installs and enables systemd-timesyncd, then enables NTP; timezone settings default to Asia/Shanghai and accept custom IANA timezone values.
+# v1.63 2026-09-22 Added a Time Management menu with system time synchronization and timezone settings. Time sync installs and enables systemd-timesyncd, then enables NTP; timezone settings default to UTC and accept custom IANA timezone values.
 # v1.61 2026-09-18 Updated the generated Nginx block.conf security rules. The default rules now consistently block malformed double-slash requests, sensitive files and directories, backup and database artifacts, PHPUnit and storage paths, webshell entry points, directory traversal, and encoded traversal attempts, while disabling access logs for blocked requests.
 # Language channel: en
 WNMP_LANG="en"
@@ -108,7 +108,7 @@ Usage:
   wnmp cf            # Install Cloudflare real IP update task
   wnmp fail2ban      # Install and configure fail2ban
   wnmp time sync     # Install and enable system time synchronization
-  wnmp time timezone [Region/City] # Set the system timezone (default: Asia/Shanghai)
+  wnmp time timezone [Region/City] # Set the system timezone (default: UTC)
   wnmp -h|--help     # Show help
 USAGE
 }
@@ -410,11 +410,11 @@ set_timezone() {
   if [[ -z "$timezone" ]]; then
     local input=""
     if [[ -r /dev/tty ]]; then
-      read -rp "Timezone [Asia/Shanghai]: " input </dev/tty || true
+      read -rp "Timezone [UTC]: " input </dev/tty || true
     else
-      read -rp "Timezone [Asia/Shanghai]: " input || true
+      read -rp "Timezone [UTC]: " input || true
     fi
-    timezone="${input:-Asia/Shanghai}"
+    timezone="${input:-UTC}"
   fi
 
   timedatectl set-timezone "$timezone"
@@ -433,7 +433,7 @@ time_management_menu() {
     timedatectl status 2>/dev/null || true
     cat <<'TIME_MENU'
   1) Synchronize system time (install and enable systemd-timesyncd)
-  2) Set timezone (default: Asia/Shanghai)
+  2) Set timezone (default: UTC)
   0) Return
 TIME_MENU
     echo
